@@ -41,6 +41,7 @@ import type { JevClient } from './llm/jev'
 import type { DriveManager } from './drive/manager'
 import type { ChatAssistant } from './chat/assistant'
 import { getEnv } from './env'
+import { whisperModel } from '@shared/whisper-models'
 import { log } from './lib/logger'
 
 export interface MainContext {
@@ -66,6 +67,15 @@ export function registerIpc(context: MainContext): void {
   const toast = (level: 'info' | 'success' | 'error', message: string): void => {
     context.broadcast({ type: 'toast', level, message })
   }
+  const assertIdleForModelChange = (): void => {
+    if (context.sessions.isRecording()) {
+      throw new Error('Detén la grabación antes de cambiar el modelo')
+    }
+    const busy = context.jobs
+      .list()
+      .some((job) => !['done', 'failed', 'cancelled'].includes(job.stage))
+    if (busy) throw new Error('Espera a que terminen los trabajos de procesamiento')
+  }
   const assertFolderChangeAllowed = (): void => {
     if (context.sessions.isRecording()) {
       throw new Error('Detén la grabación antes de renombrar o eliminar carpetas')
@@ -83,6 +93,13 @@ export function registerIpc(context: MainContext): void {
     IPC.settingsUpdate,
     (_event, patch: Partial<AppSettings>): AppSettings => {
       const previous = context.settings.get()
+      if (
+        patch?.whisperModel !== undefined &&
+        patch.whisperModel !== '' &&
+        !whisperModel(patch.whisperModel)
+      ) {
+        throw new Error('Modelo de transcripción desconocido')
+      }
       const next = context.settings.update(patch ?? {})
       context.afterSettingsUpdate(previous, next)
       return next
@@ -331,10 +348,43 @@ export function registerIpc(context: MainContext): void {
   })
 
   ipcMain.handle(IPC.whisperStatus, (): Promise<WhisperStatus> => context.whisper.status())
-  ipcMain.handle(IPC.whisperDownloadModel, async (): Promise<WhisperStatus> => {
-    const status = await context.whisper.downloadModel()
-    toast('success', 'Modelo de transcripción descargado')
-    return status
+  ipcMain.handle(
+    IPC.whisperDownloadModel,
+    async (_event, modelId: string): Promise<WhisperStatus> => {
+      const status = await context.whisper.downloadModel(String(modelId ?? ''))
+      toast('success', 'Modelo de transcripción descargado y verificado')
+      return status
+    }
+  )
+  ipcMain.handle(
+    IPC.whisperRemoveModel,
+    async (_event, modelId: string): Promise<WhisperStatus> => {
+      assertIdleForModelChange()
+      const status = await context.whisper.removeModel(String(modelId ?? ''))
+      toast('info', 'Modelo eliminado')
+      return status
+    }
+  )
+  ipcMain.handle(IPC.whisperChooseCustom, async (): Promise<WhisperStatus> => {
+    assertIdleForModelChange()
+    const options = {
+      title: 'Elegir un modelo ggml de whisper.cpp',
+      properties: ['openFile' as const],
+      filters: [{ name: 'Modelo ggml', extensions: ['bin'] }]
+    }
+    const window = context.getWindow()
+    const result = window
+      ? await dialog.showOpenDialog(window, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || !result.filePaths[0]) return context.whisper.status()
+    context.whisper.validateCustomPath(result.filePaths[0])
+    context.settings.update({ whisperModelPath: result.filePaths[0] })
+    toast('success', 'Modelo personalizado activo')
+    return context.whisper.status()
+  })
+  ipcMain.handle(IPC.whisperClearCustom, (): Promise<WhisperStatus> => {
+    context.settings.update({ whisperModelPath: null })
+    return context.whisper.status()
   })
   ipcMain.handle(IPC.whisperDownloadCuda, async (): Promise<WhisperStatus> => {
     const status = await context.whisper.downloadCuda()

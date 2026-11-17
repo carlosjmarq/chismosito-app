@@ -35,6 +35,7 @@ import { ProgressBar } from '../components/ProgressBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { FolderManager } from '../components/FolderManager'
 import { ModelPicker } from '../components/ModelPicker'
+import { WhisperModelPicker } from '../components/WhisperModelPicker'
 import { errorMessage } from '../lib/errors'
 import { formatBytes, timeAgo } from '../lib/format'
 import { cn } from '../lib/cn'
@@ -76,6 +77,7 @@ export function SettingsPage(): React.JSX.Element {
   const [savingApiKey, setSavingApiKey] = useState(false)
   const [confirmClearKey, setConfirmClearKey] = useState(false)
   const [scrubbingEnv, setScrubbingEnv] = useState(false)
+  const [confirmRemoveModel, setConfirmRemoveModel] = useState<string | null>(null)
   const [testingLlm, setTestingLlm] = useState(false)
   const [llmTest, setLlmTest] = useState<LlmTestResult | null>(null)
   const [testingJev, setTestingJev] = useState(false)
@@ -152,6 +154,15 @@ export function SettingsPage(): React.JSX.Element {
       if (patch.notesDir) {
         await refreshNotes()
       }
+      // El modelo activo y el dispositivo se resuelven en main a partir de los
+      // ajustes, así que hay que volver a pedir el estado o la UI queda vieja.
+      if (
+        patch.whisperModel !== undefined ||
+        patch.whisperModelPath !== undefined ||
+        patch.whisperDevice !== undefined
+      ) {
+        await refreshWhisper()
+      }
     } catch (error) {
       pushToast('error', errorMessage(error))
     } finally {
@@ -192,10 +203,41 @@ export function SettingsPage(): React.JSX.Element {
     await update({ notesDir: path })
   }
 
-  const downloadModel = async (): Promise<void> => {
+  const downloadModel = async (modelId: string): Promise<void> => {
     try {
-      const status = await window.chismosito.whisper.downloadModel()
+      const status = await window.chismosito.whisper.downloadModel(modelId)
       setWhisper(status)
+      await refreshWhisper()
+      const model = status.models.find((entry) => entry.id === modelId)
+      pushToast('success', `Modelo ${model ? `${model.label} · ${model.quant}` : modelId} listo`)
+    } catch (error) {
+      pushToast('error', errorMessage(error))
+    }
+  }
+
+  const removeModel = async (modelId: string): Promise<void> => {
+    try {
+      const status = await window.chismosito.whisper.removeModel(modelId)
+      setWhisper(status)
+      await refreshWhisper()
+      pushToast('info', 'Modelo eliminado del disco')
+    } catch (error) {
+      pushToast('error', errorMessage(error))
+    }
+  }
+
+  const chooseCustomModel = async (): Promise<void> => {
+    try {
+      setWhisper(await window.chismosito.whisper.chooseCustom())
+      await refreshWhisper()
+    } catch (error) {
+      pushToast('error', errorMessage(error))
+    }
+  }
+
+  const clearCustomModel = async (): Promise<void> => {
+    try {
+      setWhisper(await window.chismosito.whisper.clearCustom())
       await refreshWhisper()
     } catch (error) {
       pushToast('error', errorMessage(error))
@@ -507,57 +549,24 @@ export function SettingsPage(): React.JSX.Element {
           title="Transcripción"
           description="whisper.cpp corre en tu equipo. Nada de audio se sube a la nube."
         >
-          <div className="rounded-2xl border border-line bg-surface2/50 p-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  {whisper?.model.present ? (
-                    <Check className="size-4 text-olive" />
-                  ) : (
-                    <AlertTriangle className="size-4 text-gold" />
-                  )}
-                  <p className="text-sm font-medium">
-                    Modelo medium {whisper?.model.present ? 'instalado' : 'pendiente'}
-                  </p>
-                </div>
-                <p className="mt-1 break-all text-[11px] leading-relaxed text-muted">
-                  {whisper?.model.path}
-                  {whisper?.model.sizeBytes ? ` · ${formatBytes(whisper.model.sizeBytes)}` : ''}
-                </p>
-              </div>
-              {!whisper?.model.present ? (
-                <button
-                  className="btn-primary h-9 text-xs"
-                  onClick={() => void downloadModel()}
-                  disabled={modelDownloading}
-                >
-                  {modelDownloading ? (
-                    <Loader2 className="size-3.5 animate-spin" />
-                  ) : (
-                    <Download className="size-3.5" />
-                  )}
-                  Descargar 539 MB
-                </button>
-              ) : null}
-            </div>
-            {modelDownloading && download ? (
-              <div className="mt-3">
-                <ProgressBar value={download.percent} className="h-1.5" />
-                <div className="mt-1.5 flex items-center justify-between text-[10px] text-muted">
-                  <span>
-                    {formatBytes(download.receivedBytes)} de {formatBytes(download.totalBytes)} ·{' '}
-                    {download.percent}%
-                  </span>
-                  <button className="underline hover:no-underline" onClick={() => void cancelDownload()}>
-                    Cancelar
-                  </button>
-                </div>
-              </div>
-            ) : null}
-            {download?.kind === 'model' && download.status === 'error' ? (
-              <p className="mt-2 text-[11px] text-red-600 dark:text-red-300">{download.message}</p>
-            ) : null}
-          </div>
+          {whisper ? (
+            <WhisperModelPicker
+              status={whisper}
+              progress={download}
+              downloadingId={
+                download?.kind === 'model' &&
+                (download.status === 'downloading' || download.status === 'verifying')
+                  ? (download.modelId ?? null)
+                  : null
+              }
+              onSelect={(id) => void update({ whisperModel: id })}
+              onDownload={(id) => void downloadModel(id)}
+              onRemove={(id) => setConfirmRemoveModel(id)}
+              onChooseCustom={() => void chooseCustomModel()}
+              onClearCustom={() => void clearCustomModel()}
+              onCancelDownload={() => void cancelDownload()}
+            />
+          ) : null}
 
           <Row label="Procesador" hint="auto usa CUDA si el pack está instalado; si falla, cae a CPU.">
             <select
@@ -1237,6 +1246,17 @@ export function SettingsPage(): React.JSX.Element {
         confirmLabel="Descargar"
         onClose={() => setConfirmCuda(false)}
         onConfirm={() => void downloadCuda()}
+      />
+      <ConfirmDialog
+        open={confirmRemoveModel !== null}
+        title="Eliminar modelo"
+        description="Se borra el archivo del disco. Puedes volver a descargarlo cuando quieras; tus notas y audios no se tocan."
+        confirmLabel="Eliminar"
+        destructive
+        onClose={() => setConfirmRemoveModel(null)}
+        onConfirm={() => {
+          if (confirmRemoveModel) void removeModel(confirmRemoveModel)
+        }}
       />
       <ConfirmDialog
         open={confirmClearKey}

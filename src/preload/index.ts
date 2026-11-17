@@ -52,7 +52,10 @@ const api: ChismositoApi = {
   },
   whisper: {
     status: () => ipcRenderer.invoke(IPC.whisperStatus),
-    downloadModel: () => ipcRenderer.invoke(IPC.whisperDownloadModel),
+    downloadModel: (modelId) => ipcRenderer.invoke(IPC.whisperDownloadModel, modelId),
+    removeModel: (modelId) => ipcRenderer.invoke(IPC.whisperRemoveModel, modelId),
+    chooseCustom: () => ipcRenderer.invoke(IPC.whisperChooseCustom),
+    clearCustom: () => ipcRenderer.invoke(IPC.whisperClearCustom),
     downloadCuda: () => ipcRenderer.invoke(IPC.whisperDownloadCuda),
     cancelDownload: () => ipcRenderer.invoke(IPC.whisperCancelDownload)
   },

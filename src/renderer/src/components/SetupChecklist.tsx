@@ -16,11 +16,16 @@ export function SetupChecklist(): React.JSX.Element | null {
   const llmReady = Boolean(env?.llm.configured)
   if (modelReady && llmReady) return null
 
-  const downloadingModel = download?.kind === 'model' && download.status === 'downloading'
+  const downloadingModel =
+    download?.kind === 'model' &&
+    (download.status === 'downloading' || download.status === 'verifying')
+
+  const recommended = whisper?.models.find((model) => model.roles.includes('balanced'))
+  const recommendedId = recommended?.id ?? whisper?.recommendations?.balanced ?? ''
 
   const downloadModel = async (): Promise<void> => {
     try {
-      const status = await window.chismosito.whisper.downloadModel()
+      const status = await window.chismosito.whisper.downloadModel(recommendedId)
       setWhisper(status)
     } catch (error) {
       pushToast('error', errorMessage(error))
@@ -52,12 +57,12 @@ export function SetupChecklist(): React.JSX.Element | null {
                 <p className="text-sm font-medium">Modelo de transcripción local</p>
                 <p className="text-xs text-muted">
                   {modelReady
-                    ? 'Listo. whisper.cpp medium está instalado.'
-                    : '539 MB · se descarga una sola vez y nunca sale de tu equipo.'}
+                    ? `Listo. ${whisper?.model.name ?? 'Modelo'} instalado.`
+                    : `${recommended ? `${recommended.label} · ${recommended.quant} · ${formatBytes(recommended.bytes)}` : 'Modelo local'} — se descarga una sola vez y nunca sale de tu equipo.`}
                 </p>
                 {!modelReady && !downloadingModel ? (
                   <button onClick={downloadModel} className="btn-secondary mt-2 h-8 text-xs">
-                    <Download className="size-3.5" /> Descargar modelo
+                    <Download className="size-3.5" /> Descargar modelo recomendado
                   </button>
                 ) : null}
                 {downloadingModel && download ? (

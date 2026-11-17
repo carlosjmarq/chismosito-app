@@ -83,6 +83,18 @@ Si la API responde que el modelo no está disponible o que el acceso está desac
 
 El modelo se puede sobrescribir desde Ajustes sin editar el `.env`.
 
+### Modelos de transcripción
+
+El catálogo incluye todos los `ggml-*.bin` de whisper.cpp (tiny → large-v3, con f16/q8_0/q5_0/q5_1). En **Ajustes → Transcripción** la app:
+
+- Detecta tu equipo (`nvidia-smi` para VRAM, RAM total y núcleos) y marca tres perfiles: **Más rápido**, **Equilibrado** y **Mejor calidad** (en 4 GB: `turbo-q5_0`, `turbo-q8_0` y `large-v3-q5_0`; con 12 GB la máxima calidad pasa a `large-v3-f16`; en CPU nunca se recomienda más de `small`).
+- Muestra primero los sugeridos ("Sugeridos para tu equipo"), después el resto de multilingües y al final los solo-inglés; por modelo indica peso, VRAM y RAM estimadas y si cabe en tu GPU o iría por CPU.
+- Descarga con reanudación (`.part`), verifica **sha256** contra el catálogo y registra lo instalado en `models/index.json`.
+- Agrupa al final los modelos **solo inglés** (`EN`): no transcriben español.
+- Permite borrar modelos que no estés usando y elegir un `.bin` propio (se valida la cabecera `ggml` y se referencia donde esté, sin copiarlo).
+
+`WHISPER_MODEL_PATH` en el `.env` sigue teniendo prioridad y equivale a elegir un modelo propio.
+
 ### Jev (sugerencia de carpetas)
 
 Jev es el modelo System One de TypeSafe, disponible a través de OpenCode Console. No genera texto: recibe el resumen de la reunión y las carpetas existentes, y devuelve la carpeta que mejor encaja con una probabilidad.
@@ -128,7 +140,7 @@ MEETING_NOTES_DIR=C:\Users\tu_usuario\Documents\MeetingNotes
 USER_NAME=TuNombre
 WHISPER_DEVICE=auto      # auto | cpu | cuda
 WHISPER_LANGUAGE=es      # es | auto | en | pt | fr | de | it | ja | zh
-WHISPER_MODEL_PATH=      # opcional: ruta a un ggml-medium personalizado
+WHISPER_MODEL_PATH=      # opcional: ruta a un .bin ggml propio (tiene prioridad)
 ```
 
 - En desarrollo, el `.env` vive en la raíz del proyecto.
@@ -140,7 +152,7 @@ WHISPER_MODEL_PATH=      # opcional: ruta a un ggml-medium personalizado
 
 ## Primer uso
 
-1. **Modelo de transcripción:** descarga el modelo `medium` cuantizado (q5_0, 539 MB) desde la tarjeta «Prepara Chismosito» o desde Ajustes. Se guarda en `%APPDATA%\chismosito\models`. La app incluye el modelo Silero VAD (~885 KB) para ignorar silencios y evitar alucinaciones.
+1. **Modelo de transcripción:** elige uno en **Ajustes → Transcripción**. La app detecta tu GPU/RAM, marca el **Recomendado** y ofrece el catálogo completo de whisper.cpp (tiny → large-v3, con sus cuantizaciones f16/q8_0/q5_0/q5_1). Se descarga solo, con reanudación y verificación sha256, y se guarda en `%APPDATA%\chismosito\models`. Los modelos marcados **EN** solo transcriben inglés; para español usa los multilingües (los primeros de la lista). La app incluye el modelo Silero VAD (~885 KB) para ignorar silencios y evitar alucinaciones.
 2. **Micrófono:** autoriza el acceso. Si Windows lo bloquea, abre Configuración › Privacidad y seguridad › Micrófono.
 3. **Audio del sistema:** Windows 11 lo captura mediante loopback de Chromium; no necesitas instalar controladores. En algunas configuraciones Windows muestra un indicador de captura de pantalla.
 4. **GPU opcional:** si tienes NVIDIA, descarga el pack CUDA desde Ajustes (~650 MB; ~1.4 GB en disco). En una RTX 4060, la transcripción es aproximadamente 5 veces más rápida que en CPU. Si el pack falla, la app usa CPU automáticamente.

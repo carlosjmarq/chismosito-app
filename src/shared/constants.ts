@@ -39,6 +39,9 @@ export const IPC = {
 
   whisperStatus: 'whisper:status',
   whisperDownloadModel: 'whisper:download-model',
+  whisperRemoveModel: 'whisper:remove-model',
+  whisperChooseCustom: 'whisper:choose-custom',
+  whisperClearCustom: 'whisper:clear-custom',
   whisperDownloadCuda: 'whisper:download-cuda',
   whisperCancelDownload: 'whisper:cancel-download',
 
@@ -70,10 +73,6 @@ export const IPC = {
   event: 'app:event'
 } as const
 
-export const MODEL_FILE_NAME = 'ggml-medium-q5_0.bin'
-export const MODEL_EXPECTED_BYTES = 539_212_467
-export const MODEL_URL =
-  'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin'
 export const CUDA_ZIP_NAME = 'whisper-bin-win-cuda-12.4.0-x64.zip'
 export const CUDA_URL = `https://github.com/ggml-org/whisper.cpp/releases/download/b5454/${CUDA_ZIP_NAME}`
 export const VAD_FILE_NAME = 'ggml-silero-v5.1.2.bin'
