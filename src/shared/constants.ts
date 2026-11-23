@@ -12,6 +12,7 @@ export const IPC = {
 
   recordingStart: 'recording:start',
   recordingWebmChunk: 'recording:webm-chunk',
+  recordingTrackChunk: 'recording:track-chunk',
   recordingPcmChunk: 'recording:pcm-chunk',
   recordingStop: 'recording:stop',
   recordingCancel: 'recording:cancel',
@@ -31,6 +32,12 @@ export const IPC = {
   notesReveal: 'notes:reveal',
   notesResummarize: 'notes:resummarize',
   notesReprocess: 'notes:reprocess',
+  notesRetranscribeBegin: 'notes:retranscribe-begin',
+  notesRetranscribeChunk: 'notes:retranscribe-chunk',
+  notesRetranscribeFinish: 'notes:retranscribe-finish',
+  notesRetranscribeCancel: 'notes:retranscribe-cancel',
+  notesDuplicate: 'notes:duplicate',
+  notesAudioBytes: 'notes:audio-bytes',
   notesSearch: 'notes:search',
 
   foldersCreate: 'folders:create',
@@ -43,6 +50,7 @@ export const IPC = {
   whisperChooseCustom: 'whisper:choose-custom',
   whisperClearCustom: 'whisper:clear-custom',
   whisperDownloadCuda: 'whisper:download-cuda',
+  whisperDownloadVad: 'whisper:download-vad',
   whisperCancelDownload: 'whisper:cancel-download',
 
   llmTest: 'llm:test',

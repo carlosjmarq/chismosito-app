@@ -135,6 +135,8 @@ async function bootstrap(): Promise<void> {
     jev,
     emitJobs: (entries) => broadcast({ type: 'jobs', jobs: entries }),
     emitToast: (level, message) => toast(level, message),
+    emitLiveSegment: (notePath, segment) =>
+      broadcast({ type: 'transcript-live', notePath, segment }),
     onNoteChanged: () => broadcast({ type: 'notes-changed' }),
     backupNote: (notePath) => drive.backupNote(notePath),
     driveEnabled: () => drive.autoBackupEnabled()

@@ -244,6 +244,15 @@ export function SettingsPage(): React.JSX.Element {
     }
   }
 
+  const downloadVad = async (): Promise<void> => {
+    try {
+      setWhisper(await window.chismosito.whisper.downloadVad())
+      pushToast('success', 'Detector de voz instalado')
+    } catch (error) {
+      pushToast('error', errorMessage(error))
+    }
+  }
+
   const downloadCuda = async (): Promise<void> => {
     try {
       const status = await window.chismosito.whisper.downloadCuda()
@@ -386,6 +395,10 @@ export function SettingsPage(): React.JSX.Element {
       setBackingUp(false)
     }
   }
+
+  const vadDownloading =
+    download?.kind === 'vad' &&
+    (download.status === 'downloading' || download.status === 'verifying')
 
   const modelDownloading =
     download?.kind === 'model' && ['downloading', 'extracting'].includes(download.status)
@@ -567,6 +580,43 @@ export function SettingsPage(): React.JSX.Element {
               onCancelDownload={() => void cancelDownload()}
             />
           ) : null}
+
+          <Row
+            label="Detectar voz (VAD)"
+            hint="Corta los silencios antes de transcribir. Reduce las alucinaciones del modelo en tramos sin voz."
+          >
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <Toggle
+                  checked={settings.vadEnabled}
+                  onChange={(value) => {
+                    void update({ vadEnabled: value })
+                    if (value && !whisper?.vad.present) void downloadVad()
+                  }}
+                />
+                <span className="text-[11px] text-muted">
+                  {whisper?.vad.present
+                    ? 'silero instalado'
+                    : 'silero · 0.9 MB · pendiente'}
+                </span>
+                {!whisper?.vad.present ? (
+                  <button
+                    className="btn-secondary h-7 text-[10px]"
+                    onClick={() => void downloadVad()}
+                    disabled={vadDownloading}
+                  >
+                    {vadDownloading ? (
+                      <Loader2 className="size-3 animate-spin" />
+                    ) : (
+                      <Download className="size-3" />
+                    )}
+                    Descargar
+                  </button>
+                ) : null}
+              </div>
+              <p className="break-all text-[10px] text-muted">{whisper?.vad.path}</p>
+            </div>
+          </Row>
 
           <Row label="Procesador" hint="auto usa CUDA si el pack está instalado; si falla, cae a CPU.">
             <select

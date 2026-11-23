@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync } from 'node:fs'
-import { copyFile } from 'node:fs/promises'
+import { copyFile, readFile, stat } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type {
@@ -17,6 +17,7 @@ import type {
   DriveBackupSummary,
   DriveStatus,
   EnvStatus,
+  Job,
   LlmKeyStatus,
   LlmModelList,
   LlmTestResult,
@@ -40,6 +41,8 @@ import type { LlmClient } from './llm/summarizer'
 import type { JevClient } from './llm/jev'
 import type { DriveManager } from './drive/manager'
 import type { ChatAssistant } from './chat/assistant'
+import { hasTrackFiles, retranscribeSessions } from './notes/retranscribe'
+import { trackFileName } from '@shared/recording-tracks'
 import { getEnv } from './env'
 import { whisperModel } from '@shared/whisper-models'
 import { log } from './lib/logger'
@@ -196,6 +199,13 @@ export function registerIpc(context: MainContext): void {
     context.sessions.sendWebmChunk(id, normalizeChunk(chunk))
   })
   ipcMain.on(
+    IPC.recordingTrackChunk,
+    (_event, id: string, track: 'you' | 'others', chunk: ArrayBuffer | Uint8Array) => {
+      if (typeof id !== 'string' || (track !== 'you' && track !== 'others')) return
+      context.sessions.appendTrackChunk(id, track, normalizeChunk(chunk))
+    }
+  )
+  ipcMain.on(
     IPC.recordingPcmChunk,
     (_event, id: string, track: 'mic' | 'system', chunk: ArrayBuffer | Uint8Array) => {
       if (typeof id !== 'string' || (track !== 'mic' && track !== 'system')) return
@@ -329,6 +339,104 @@ export function registerIpc(context: MainContext): void {
     toast('info', 'Reprocesando el audio completo…')
   })
 
+  ipcMain.handle(IPC.notesDuplicate, async (_event, path: string): Promise<NoteDetail> => {
+    const copy = await context.notes.duplicate(String(path))
+    context.broadcast({ type: 'notes-changed' })
+    toast('success', 'Nota duplicada')
+    return copy
+  })
+
+  ipcMain.handle(
+    IPC.notesAudioBytes,
+    async (
+      _event,
+      path: string,
+      track?: 'mix' | 'you' | 'others'
+    ): Promise<ArrayBuffer> => {
+      const note = await context.notes.get(String(path))
+      if (!note) throw new Error('La nota no existe')
+      if (!note.audio) throw new Error('La nota no tiene audio guardado')
+      const fileName =
+        track === 'you'
+          ? trackFileName(note.audio, 'you')
+          : track === 'others'
+            ? trackFileName(note.audio, 'others')
+            : note.audio
+      const absolute = join(dirname(note.path), fileName)
+      if (!existsSync(absolute)) throw new Error('No se encontró el archivo de audio')
+      const info = await stat(absolute)
+      if (info.size > 2 * 1024 * 1024 * 1024) {
+        throw new Error('El audio es demasiado grande para procesarlo en la app')
+      }
+      const bytes = await readFile(absolute)
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.notesRetranscribeBegin,
+    async (
+      _event,
+      path: string
+    ): Promise<{ id: string; needs: Array<'mixed' | 'you' | 'others'> }> => {
+      if (context.sessions.isRecording()) {
+        throw new Error('Detén la grabación antes de re-transcribir')
+      }
+      const note = await context.notes.get(String(path))
+      if (!note) throw new Error('La nota no existe')
+      if (!note.audio) throw new Error('La nota no tiene audio guardado')
+      const dir = dirname(note.path)
+      if (!existsSync(join(dir, note.audio))) {
+        throw new Error('No se encontró el archivo de audio de la nota')
+      }
+      const mode = hasTrackFiles(dir, note.audio) ? 'tracks' : 'mixed'
+      return retranscribeSessions().begin(note.path, mode)
+    }
+  )
+  ipcMain.handle(
+    IPC.notesRetranscribeChunk,
+    (
+      _event,
+      id: string,
+      track: 'mixed' | 'you' | 'others',
+      chunk: ArrayBuffer | Uint8Array
+    ): void => {
+      if (track !== 'mixed' && track !== 'you' && track !== 'others') return
+      retranscribeSessions().append(String(id), track, normalizeChunk(chunk))
+    }
+  )
+  ipcMain.handle(
+    IPC.notesRetranscribeFinish,
+    async (_event, id: string): Promise<Job> => {
+      const finished = retranscribeSessions().finish(String(id))
+      const note = await context.notes.get(finished.notePath)
+      if (!note) throw new Error('La nota no existe')
+      const whisperStatus = await context.whisper.status()
+      const audioPath = note.audio ? join(dirname(note.path), note.audio) : note.path
+      const job = context.jobs.enqueue({
+        id: randomUUID(),
+        baseName: note.baseName,
+        notePath: note.path,
+        audioPath,
+        micWavPath: finished.youWavPath,
+        systemWavPath: finished.othersWavPath,
+        transcribeAudioPath: finished.wavPath,
+        durationSeconds: note.durationSeconds,
+        language: note.language,
+        hasMic: Boolean(finished.youWavPath),
+        hasSystem: Boolean(finished.othersWavPath),
+        meetingDate: note.date || new Date().toISOString()
+      })
+      await context.notes.setStatus(note.path, 'processing')
+      context.broadcast({ type: 'notes-changed' })
+      toast('info', `Regenerando transcripción con ${whisperStatus.model.name}…`)
+      return job
+    }
+  )
+  ipcMain.handle(IPC.notesRetranscribeCancel, (_event, id: string): Promise<void> =>
+    retranscribeSessions().cancel(String(id))
+  )
+
   ipcMain.handle(IPC.foldersCreate, async (_event, path: string) => {
     const result = await context.notes.createFolder(String(path))
     context.broadcast({ type: 'notes-changed' })
@@ -351,7 +459,12 @@ export function registerIpc(context: MainContext): void {
   ipcMain.handle(
     IPC.whisperDownloadModel,
     async (_event, modelId: string): Promise<WhisperStatus> => {
-      const status = await context.whisper.downloadModel(String(modelId ?? ''))
+      let status = await context.whisper.downloadModel(String(modelId ?? ''))
+      // El VAD pesa 0.9 MB: se baja junto con el modelo para que el usuario no
+      // tenga que instalar nada más.
+      if (context.settings.get().vadEnabled && !status.vad.present) {
+        status = await context.whisper.downloadVad().catch(() => status)
+      }
       toast('success', 'Modelo de transcripción descargado y verificado')
       return status
     }
@@ -385,6 +498,11 @@ export function registerIpc(context: MainContext): void {
   ipcMain.handle(IPC.whisperClearCustom, (): Promise<WhisperStatus> => {
     context.settings.update({ whisperModelPath: null })
     return context.whisper.status()
+  })
+  ipcMain.handle(IPC.whisperDownloadVad, async (): Promise<WhisperStatus> => {
+    const status = await context.whisper.downloadVad()
+    toast('success', 'Detector de voz (VAD) instalado')
+    return status
   })
   ipcMain.handle(IPC.whisperDownloadCuda, async (): Promise<WhisperStatus> => {
     const status = await context.whisper.downloadCuda()

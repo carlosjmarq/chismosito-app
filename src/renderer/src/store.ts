@@ -8,6 +8,7 @@ import type {
   EnvStatus,
   Job,
   NoteMeta,
+  LiveSegment,
   RecorderSnapshot,
   ToastLevel,
   WhisperStatus
@@ -46,6 +47,7 @@ interface AppStore {
   toasts: ToastItem[]
   notesLoading: boolean
   notesRevision: number
+  liveTranscript: Record<string, LiveSegment[]>
   refreshNotes: () => Promise<void>
   refreshJobs: () => Promise<void>
   refreshWhisper: () => Promise<void>
@@ -64,6 +66,8 @@ interface AppStore {
   pushToast: (level: ToastLevel, message: string) => void
   dismissToast: (id: string) => void
   bumpNotes: () => void
+  appendLiveSegment: (notePath: string, segment: LiveSegment) => void
+  clearLiveTranscript: (notePath: string) => void
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -82,6 +86,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   toasts: [],
   notesLoading: false,
   notesRevision: 0,
+  liveTranscript: {},
 
   refreshNotes: async () => {
     set({ notesLoading: true })
@@ -163,7 +168,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => ({ toasts: [...state.toasts.slice(-4), { id, level, message }] }))
   },
   dismissToast: (id) => set((state) => ({ toasts: state.toasts.filter((toast) => toast.id !== id) })),
-  bumpNotes: () => set((state) => ({ notesRevision: state.notesRevision + 1 }))
+  bumpNotes: () => set((state) => ({ notesRevision: state.notesRevision + 1 })),
+  appendLiveSegment: (notePath, segment) => {
+    set((state) => {
+      const current = state.liveTranscript[notePath] ?? []
+      const next = current.length >= 2000 ? current.slice(-1999) : current.slice()
+      next.push(segment)
+      return { liveTranscript: { ...state.liveTranscript, [notePath]: next } }
+    })
+  },
+  clearLiveTranscript: (notePath) => {
+    set((state) => {
+      if (!state.liveTranscript[notePath]) return state
+      const next = { ...state.liveTranscript }
+      delete next[notePath]
+      return { liveTranscript: next }
+    })
+  }
 }))
 
 function applyTheme(settings: AppSettings): void {

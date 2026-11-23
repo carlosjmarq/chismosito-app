@@ -15,6 +15,22 @@ const summary: SummaryData = {
   ]
 }
 
+  const processingBase = {
+    title: 'Planificación Q4',
+    date: '2026-11-14T15:30:00-06:00',
+    durationSeconds: 3_720,
+    language: 'es',
+    audio: '2026-11-14-15-30.webm',
+    folder: '',
+    tags: [],
+    status: 'processing' as const,
+    llm: null,
+    summary: null,
+    transcript: '',
+    createdAt: '2026-11-14T15:30:00-06:00',
+    updatedAt: '2026-11-14T15:30:00-06:00'
+  }
+
 describe('note markdown', () => {
   it('builds the summary, decisions, actions and transcript with a divider', () => {
     const markdown = buildNoteMarkdown({
@@ -71,4 +87,21 @@ describe('note markdown', () => {
     expect(markdown).toContain('## Transcripción')
     expect(markdown).not.toContain('## Decisiones')
   })
+
+  it('conserva la transcripción mientras el resumen está pendiente', () => {
+    const markdown = buildNoteMarkdown({
+      ...processingBase,
+      transcript: '[00:00:12] **Yo:** Hola a todos.'
+    })
+    expect(markdown).toContain('[00:00:12] **Yo:** Hola a todos.')
+    expect(markdown).not.toContain('_(Pendiente)_')
+    expect(markdown).toContain('Transcripción lista')
+  })
+
+  it('usa el placeholder cuando todavía no hay transcripción', () => {
+    const markdown = buildNoteMarkdown({ ...processingBase, transcript: '' })
+    expect(markdown).toContain('_(Pendiente)_')
+    expect(markdown).toContain('Procesando la grabación')
+  })
+
 })

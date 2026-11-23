@@ -357,24 +357,30 @@ export class LlmClient {
     const client = this.client(sessionId)
     const config = clientConfig(this.settings, this.secrets)
     let lastError: unknown = null
+    let budget = maxTokens
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const useJsonMode = attempt === 0
         const response = await client.chat.completions.create({
           model: config.model,
           messages,
           temperature: attempt === 0 ? 0.2 : 0.1,
-          max_tokens: maxTokens,
+          max_tokens: budget,
           ...(useJsonMode ? { response_format: { type: 'json_object' as const } } : {})
         })
         const content = response.choices[0]?.message?.content ?? ''
-        if (!content.trim()) {
-          if (response.choices[0]?.finish_reason === 'length') {
-            throw new Error('El modelo agotó el límite de tokens antes de devolver el JSON')
-          }
-          throw new Error('Respuesta vacía del modelo')
+        if (response.choices[0]?.finish_reason === 'length') {
+          // El modelo se quedó sin presupuesto (los tokens de razonamiento
+          // cuentan): se reintenta con más margen antes de fallar.
+          lastError = new Error(
+            'El modelo agotó el límite de tokens antes de devolver el JSON'
+          )
+          budget = Math.min(budget * 2, 32_000)
+          log.warn(`Respuesta truncada por tokens; reintento con ${budget}`)
+          continue
         }
+        if (!content.trim()) throw new Error('Respuesta vacía del modelo')
         return extractJson(content)
       } catch (error) {
         lastError = error
@@ -383,6 +389,37 @@ export class LlmClient {
       }
     }
     throw new Error(friendlyLlmError(lastError))
+  }
+
+  /**
+   * Resumen parcial con recorte adaptativo: si el modelo se queda sin tokens,
+   * parte el texto en dos y reintenta, en vez de fallar la reunión entera.
+   */
+  private async partialSummaries(
+    text: string,
+    context: SummaryContext,
+    index: number,
+    total: number,
+    sessionId: string
+  ): Promise<Array<z.infer<typeof partialSchema>>> {
+    try {
+      const raw = await this.requestJson(
+        buildPartialMessages(text, context, index, total),
+        8000,
+        sessionId
+      )
+      return [partialSchema.parse(raw)]
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/límite de tokens|length/i.test(message) && text.length > 6_000) {
+        const mid = Math.floor(text.length / 2)
+        return [
+          ...(await this.partialSummaries(text.slice(0, mid), context, index, total, sessionId)),
+          ...(await this.partialSummaries(text.slice(mid), context, index, total, sessionId))
+        ]
+      }
+      throw error
+    }
   }
 
   async summarize(
@@ -395,16 +432,15 @@ export class LlmClient {
     const config = clientConfig(this.settings, this.secrets)
     const partials: Array<z.infer<typeof partialSchema>> = []
 
+    // Umbral más bajo: con reuniones largas el resumen en una sola llamada
+    // agotaba el presupuesto de tokens del modelo y fallaba.
     if (transcript.length > 30_000) {
       const chunks = chunkTranscript(transcript)
       for (let i = 0; i < chunks.length; i += 1) {
         if (signal?.aborted) throw new Error('Resumen cancelado')
-        const partial = await this.requestJson(
-          buildPartialMessages(chunks[i], context, i + 1, chunks.length),
-          3000,
-          sessionId
+        partials.push(
+          ...(await this.partialSummaries(chunks[i], context, i + 1, chunks.length, sessionId))
         )
-        partials.push(partialSchema.parse(partial))
       }
     }
 

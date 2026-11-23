@@ -91,6 +91,7 @@ El catálogo incluye todos los `ggml-*.bin` de whisper.cpp (tiny → large-v3, c
 - Muestra primero los sugeridos ("Sugeridos para tu equipo"), después el resto de multilingües y al final los solo-inglés; por modelo indica peso, VRAM y RAM estimadas y si cabe en tu GPU o iría por CPU.
 - Descarga con reanudación (`.part`), verifica **sha256** contra el catálogo y registra lo instalado en `models/index.json`.
 - Agrupa al final los modelos **solo inglés** (`EN`): no transcriben español.
+- **Detección de voz (VAD)**: un modelo silero de 0.9 MB (`ggml-org/whisper-vad`) corta los silencios antes de transcribir, lo que evita las alucinaciones típicas de whisper en tramos sin voz. Se descarga solo al bajar el primer modelo y se puede activar o desactivar en Ajustes → Transcripción.
 - Permite borrar modelos que no estés usando y elegir un `.bin` propio (se valida la cabecera `ggml` y se referencia donde esté, sin copiarlo).
 
 `WHISPER_MODEL_PATH` en el `.env` sigue teniendo prioridad y equivale a elegir un modelo propio.
@@ -193,6 +194,8 @@ WHISPER_MODEL_PATH=      # opcional: ruta a un .bin ggml propio (tiene prioridad
 - **Respaldo:** si Drive está conectado, puedes respaldar una nota desde su vista o todo desde Ajustes. El respaldo automático se activa al terminar el procesamiento. Los chats se respaldan en `Conversaciones/` si activas **Respaldar conversaciones**.
 - **Regenerar resumen:** si el LLM falló, aparece un botón para reintentar sin volver a transcribir.
 - **Reprocesar audio:** vuelve a transcribir el WebM original de principio a fin (útil si una nota quedó con una transcripción incompleta). Antes de reemplazar la nota guarda una copia `*.md.bak`.
+- **Regenerar transcripción:** vuelve a transcribir el audio guardado con el modelo activo y después regenera el resumen. Sirve para aprovechar un modelo mejor sin volver a grabar. El audio se decodifica en la app (webm/opus → WAV 16 kHz) y los hablantes se reasignan usando los tiempos de la transcripción anterior, porque el audio guardado ya viene mezclado. Si la nota guarda las pistas separadas (`-yo`/`-otros`), se usan y «Yo/Otros» quedan exactos.
+- **Duplicar:** copia la nota y su audio junto al original con el título «(copia)». Sirve para probar otro modelo o reescribir el resumen sin perder la versión original; el original no se toca.
 - **Bandeja:** cerrar la ventana la oculta; la grabación y el procesamiento continúan. «Salir» desde la bandeja pide confirmación si hay trabajo en curso.
 
 ### Ajustes que conviene revisar

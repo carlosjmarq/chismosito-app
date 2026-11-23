@@ -32,7 +32,10 @@ export default function App(): React.JSX.Element {
   const refreshWhisper = useAppStore((state) => state.refreshWhisper)
   const refreshJobs = useAppStore((state) => state.refreshJobs)
   const refreshEnv = useAppStore((state) => state.refreshEnv)
+  const appendLiveSegment = useAppStore((state) => state.appendLiveSegment)
+  const clearLiveTranscript = useAppStore((state) => state.clearLiveTranscript)
   const notesTimer = useRef<number | null>(null)
+  const activeNotesRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     void initialize()
@@ -43,8 +46,23 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     const unsubscribe = window.chismosito.onEvent((event) => {
       switch (event.type) {
-        case 'jobs':
+        case 'jobs': {
           setJobs(event.jobs)
+          const active = new Set(
+            event.jobs
+              .filter((job) => !['done', 'failed', 'cancelled'].includes(job.stage))
+              .map((job) => job.notePath)
+          )
+          // Solo se limpia cuando la nota se queda sin trabajos activos: el
+          // historial incluye trabajos viejos ya terminados de la misma nota.
+          for (const notePath of activeNotesRef.current) {
+            if (!active.has(notePath)) clearLiveTranscript(notePath)
+          }
+          activeNotesRef.current = active
+          break
+        }
+        case 'transcript-live':
+          appendLiveSegment(event.notePath, event.segment)
           break
         case 'notes-changed':
           bumpNotes()
@@ -113,6 +131,8 @@ export default function App(): React.JSX.Element {
     pushToast,
     refreshNotes,
     refreshEnv,
+    appendLiveSegment,
+    clearLiveTranscript,
     refreshWhisper,
     setDrive,
     setDriveProgress,

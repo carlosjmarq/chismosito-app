@@ -3,14 +3,16 @@ import { existsSync } from 'node:fs'
 import { rm, stat } from 'node:fs/promises'
 import { dirname, join, basename } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Job, JobStage } from '@shared/types'
+import type { Job, JobStage, LiveSegment } from '@shared/types'
 import { MISSING_KEY_MESSAGE } from '@shared/constants'
 import type { SettingsStore } from '../settings'
 import type { NoteRepository } from '../notes/repository'
 import type { WhisperManager } from '../whisper/manager'
 import { runWhisper, type RawSegment } from '../whisper/runner'
-import { mergeSpeakers, renderTranscript } from '../whisper/merge'
+import { cleanSegmentText, mergeSpeakers, renderTranscript } from '../whisper/merge'
 import { withMixWav } from '../audio/ffmpeg'
+import { assignSpeakers, nearestSpeaker, parseSpeakerTimeline } from '../whisper/relabel'
+import { MIN_TRACK_PEAK, wavPeak } from '../whisper/wav-peak'
 import type { LlmClient } from '../llm/summarizer'
 import type { JevClient, FolderSuggestion } from '../llm/jev'
 import { ensureDir, writeAtomic } from '../lib/fs'
@@ -23,6 +25,7 @@ export interface NewJobInput {
   audioPath: string
   micWavPath: string | null
   systemWavPath: string | null
+  transcribeAudioPath?: string | null
   durationSeconds: number
   language: string
   hasMic: boolean
@@ -40,6 +43,7 @@ interface JobRunnerDeps {
   jev: JevClient
   emitJobs: (jobs: Job[]) => void
   emitToast: (level: 'info' | 'success' | 'error', message: string) => void
+  emitLiveSegment?: (notePath: string, segment: LiveSegment) => void
   onNoteChanged: () => void
   backupNote?: (notePath: string) => Promise<void>
   driveEnabled?: () => boolean
@@ -163,6 +167,7 @@ export class JobRunner {
       audioPath: input.audioPath,
       micWavPath: input.micWavPath,
       systemWavPath: input.systemWavPath,
+      transcribeAudioPath: input.transcribeAudioPath ?? null,
       durationSeconds: input.durationSeconds,
       language: input.language,
       hasMic: input.hasMic,
@@ -312,8 +317,13 @@ export class JobRunner {
         tapIssue = tapIssue ?? 'pista del sistema incompleta'
       }
 
+      const retranscribe =
+        job.transcribeAudioPath && existsSync(job.transcribeAudioPath)
+          ? job.transcribeAudioPath
+          : null
       const summaryOnly = Boolean(
         !job.reprocessAudio &&
+          !retranscribe &&
           existingTranscript &&
           !availableMic &&
           !availableSystem &&
@@ -321,6 +331,7 @@ export class JobRunner {
       )
       const mixOnly = Boolean(
         !summaryOnly &&
+          !retranscribe &&
           (job.reprocessAudio ||
             Boolean(tapIssue) ||
             (!availableMic && !availableSystem))
@@ -348,38 +359,67 @@ export class JobRunner {
         let micSegments: RawSegment[] = []
         let systemSegments: RawSegment[] = []
         let mixSegments: RawSegment[] = []
+        const timeline = retranscribe ? parseSpeakerTimeline(existingTranscript) : []
 
         const transcribe = async (
-          wavPath: string,
-          kind: 'mic' | 'system' | 'mix'
+          wav: string | null,
+          kind: 'mic' | 'system' | 'mixed'
         ): Promise<RawSegment[]> => {
+          if (!wav || !existsSync(wav)) return []
+          // Pista sin señal real: whisper alucinaría frases sobre el ruido.
+          const peak = await wavPeak(wav).catch(() => 1)
+          if (peak < MIN_TRACK_PEAK) {
+            log.info(`Pista ${kind} sin señal (pico ${peak.toFixed(4)}); se omite`)
+            return []
+          }
           const stage: JobStage =
             kind === 'mic'
               ? 'transcribing_mic'
               : kind === 'system'
                 ? 'transcribing_system'
                 : 'transcribing_mix'
+          const stageMessage =
+            kind === 'mixed' ? 'Re-transcribiendo con el modelo activo' : STAGE_MESSAGES[stage]
           const base = kind === 'mic' ? 8 : kind === 'system' ? 34 : 10
-          const span = kind === 'mix' ? 50 : 26
-          this.update(job, { stage, progress: base, message: STAGE_MESSAGES[stage] })
+          const span = kind === 'mixed' ? 50 : 26
+          this.update(job, { stage, progress: base, message: stageMessage })
 
           const attempt = async (device: 'cpu' | 'cuda'): Promise<RawSegment[]> =>
             runWhisper({
+              // Sin contexto previo en todas las pistas: en tramos sin voz el
+              // prompt se retroalimenta y el modelo inventa frases.
+              noContext: true,
+              vadModelPath:
+                settings.vadEnabled && this.deps.whisper.hasVad()
+                  ? this.deps.whisper.vadPath()
+                  : null,
               cliPath:
                 device === 'cuda'
                   ? this.deps.whisper.cudaCliPath() ?? this.deps.whisper.cpuCliPath()
                   : this.deps.whisper.cpuCliPath(),
               modelPath: this.deps.whisper.modelPath(),
-              wavPath,
+              wavPath: wav,
               language: job.language,
               device,
               threads: settings.whisperThreads,
-              vadModelPath: this.deps.whisper.vadModelPath(),
               signal,
+              onSegment: (segment) => {
+                const nearest = nearestSpeaker(timeline, Math.max(0, segment.fromMs))
+                const speaker: 'Yo' | 'Otros' =
+                  kind === 'mic' ? 'Yo' : kind === 'system' ? 'Otros' : nearest === 'Yo' ? 'Yo' : 'Otros'
+                const text = cleanSegmentText(segment.text)
+                if (!text) return
+                this.deps.emitLiveSegment?.(job.notePath, {
+                  speaker,
+                  fromMs: Math.max(0, segment.fromMs),
+                  toMs: Math.max(segment.fromMs, segment.toMs),
+                  text
+                })
+              },
               onProgress: (percent) => {
                 this.update(job, {
                   progress: Math.min(60, Math.round(base + (percent / 100) * span)),
-                  message: `${STAGE_MESSAGES[stage]} · ${percent}%`
+                  message: `${stageMessage} · ${percent}%`
                 })
               }
             })
@@ -400,37 +440,47 @@ export class JobRunner {
           }
         }
 
-        if (mixOnly) {
+        if (retranscribe) {
+          // Audio mezclado: una sola pista, y se recuperan los hablantes del
+          // timeline de la transcripción anterior.
+          const segments = await transcribe(retranscribe, 'mixed')
+          if (signal?.aborted) throw new Error('Procesamiento cancelado')
+          transcriptText = renderTranscript(assignSpeakers(segments, timeline)).markdown
+        } else if (mixOnly) {
           this.update(job, {
             stage: 'preparing_audio',
             progress: 4,
             message: STAGE_MESSAGES.preparing_audio
           })
           mixSegments = await withMixWav(job.audioPath, signal, (wavPath) =>
-            transcribe(wavPath, 'mix')
+            transcribe(wavPath, 'mixed')
           )
+          if (signal?.aborted) throw new Error('Procesamiento cancelado')
+
+          this.update(job, { stage: 'merging', progress: 62, message: STAGE_MESSAGES.merging })
+          const merged = mergeSpeakers([], mixSegments).map((segment) => ({
+            ...segment,
+            speaker: 'Mixto' as const
+          }))
+          transcriptText = renderTranscript(merged).markdown
         } else {
           if (availableMic) micSegments = await transcribe(availableMic, 'mic')
           if (signal?.aborted) throw new Error('Procesamiento cancelado')
           if (availableSystem) systemSegments = await transcribe(availableSystem, 'system')
-        }
-        if (signal?.aborted) throw new Error('Procesamiento cancelado')
+          if (signal?.aborted) throw new Error('Procesamiento cancelado')
 
-        this.update(job, { stage: 'merging', progress: 62, message: STAGE_MESSAGES.merging })
-        const merged = mixOnly
-          ? mergeSpeakers([], mixSegments).map((segment) => ({
-              ...segment,
-              speaker: 'Mixto' as const
-            }))
-          : mergeSpeakers(micSegments, systemSegments)
-        const rendered = renderTranscript(merged)
-        transcriptText = rendered.markdown
+          this.update(job, { stage: 'merging', progress: 62, message: STAGE_MESSAGES.merging })
+          const merged = mergeSpeakers(micSegments, systemSegments)
+          transcriptText = renderTranscript(merged).markdown
+        }
 
         if (!transcriptText.trim()) {
           throw new Error(
-            mixOnly
-              ? 'No se detectó voz en el audio completo. Revisa que el audio no estuviera silenciado.'
-              : 'No se detectó voz en la grabación. Revisa que el micrófono y el audio del sistema no estuvieran silenciados.'
+            retranscribe
+              ? 'No se detectó voz en el audio guardado. Revisa que el audio no estuviera silenciado.'
+              : mixOnly
+                ? 'No se detectó voz en el audio completo. Revisa que el audio no estuviera silenciado.'
+                : 'No se detectó voz en la grabación. Revisa que el micrófono y el audio del sistema no estuvieran silenciados.'
           )
         }
 
@@ -601,6 +651,10 @@ export class JobRunner {
   }
 
   private async cleanupTemp(job: Job): Promise<void> {
+    if (job.transcribeAudioPath) {
+      await rm(job.transcribeAudioPath, { force: true })
+      await rm(dirname(job.transcribeAudioPath), { recursive: true, force: true })
+    }
     for (const path of [job.micWavPath, job.systemWavPath]) {
       if (!path) continue
       await rm(path, { force: true })
