@@ -35,6 +35,8 @@ export interface AppSettings {
   /** Id del catálogo ('' = automático según el equipo). */
   whisperModel: string
   whisperModelPath: string | null
+  /** Cortar silencios con VAD (silero) antes de transcribir. */
+  vadEnabled: boolean
   keepTempWav: boolean
   llmModel: string
   folderSuggestions: boolean
@@ -114,6 +116,13 @@ export interface WhisperModelStatus {
 
 export type WhisperProfile = 'fastest' | 'balanced' | 'quality'
 
+export interface LiveSegment {
+  speaker: 'Yo' | 'Otros'
+  fromMs: number
+  toMs: number
+  text: string
+}
+
 export interface WhisperModelInfo {
   id: string
   label: string
@@ -153,9 +162,10 @@ export interface WhisperStatus {
   customPath: string | null
   installedBytes: number
   diskFreeBytes: number | null
+  vad: { present: boolean; path: string; bytes: number }
 }
 
-export type DownloadKind = 'model' | 'cuda'
+export type DownloadKind = 'model' | 'cuda' | 'vad'
 export type DownloadStatus =
   | 'idle'
   | 'downloading'
@@ -274,6 +284,8 @@ export interface Job {
   audioPath: string
   micWavPath: string | null
   systemWavPath: string | null
+  /** WAV temporal de una re-transcripción (audio ya mezclado, una sola pista). */
+  transcribeAudioPath?: string | null
   durationSeconds: number
   language: string
   hasMic: boolean
@@ -429,6 +441,7 @@ export type AppEvent =
   | { type: 'chat'; event: ChatStreamEvent }
   | { type: 'toast'; level: ToastLevel; message: string }
   | { type: 'env-changed' }
+  | { type: 'transcript-live'; notePath: string; segment: LiveSegment }
 
 export interface ChismositoApi {
   app: {
@@ -448,6 +461,7 @@ export interface ChismositoApi {
   recording: {
     start(input: RecordingStartInput): Promise<RecordingStartResult>
     sendWebmChunk(id: string, chunk: ArrayBuffer): void
+    sendTrackChunk(id: string, track: 'you' | 'others', chunk: ArrayBuffer): void
     sendPcmChunk(id: string, track: 'mic' | 'system', chunk: ArrayBuffer): void
     stop(input: RecordingStopInput): Promise<Job>
     cancel(id: string): Promise<void>
@@ -469,6 +483,14 @@ export interface ChismositoApi {
     reveal(path: string): Promise<void>
     resummarize(path: string): Promise<void>
     reprocess(path: string): Promise<void>
+    duplicate(path: string): Promise<NoteDetail>
+    audioBytes(path: string, track?: 'mix' | 'you' | 'others'): Promise<ArrayBuffer>
+    retranscribeBegin(
+      path: string
+    ): Promise<{ id: string; needs: Array<'mixed' | 'you' | 'others'> }>
+    retranscribeChunk(id: string, track: 'mixed' | 'you' | 'others', chunk: ArrayBuffer): Promise<void>
+    retranscribeFinish(id: string): Promise<Job>
+    retranscribeCancel(id: string): Promise<void>
     search(query: string): Promise<NoteMeta[]>
   }
   folders: {
@@ -480,6 +502,7 @@ export interface ChismositoApi {
     status(): Promise<WhisperStatus>
     downloadModel(modelId: string): Promise<WhisperStatus>
     removeModel(modelId: string): Promise<WhisperStatus>
+    downloadVad(): Promise<WhisperStatus>
     chooseCustom(): Promise<WhisperStatus>
     clearCustom(): Promise<WhisperStatus>
     downloadCuda(): Promise<WhisperStatus>

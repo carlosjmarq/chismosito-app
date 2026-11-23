@@ -138,6 +138,16 @@ export function buildNoteMarkdown(input: NoteBuildInput): string {
   const sections: string[] = [`# ${title} — ${dateLabel}`]
 
   if (input.status === 'processing' || input.status === 'recording') {
+    const partialTranscript = (input.transcript ?? '').trim()
+    if (partialTranscript) {
+      // La transcripción ya existe (p. ej. al re-transcribir): no se descarta.
+      sections.push(
+        '> Transcripción lista. El resumen, las decisiones y las acciones aparecerán al terminar.'
+      )
+      sections.push('---')
+      sections.push(`## Transcripción\n\n${partialTranscript}`)
+      return composeNote(data, sections.join('\n\n'))
+    }
     sections.push(
       '> Procesando la grabación… El resumen y la transcripción aparecerán aquí al terminar.'
     )

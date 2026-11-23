@@ -21,6 +21,7 @@ import type {
 } from '@shared/types'
 import type { SettingsStore } from '../settings'
 import { ensureDir, isInside, uniquePath, writeAtomic } from '../lib/fs'
+import { trackFileName, type RecordingTrack } from '@shared/recording-tracks'
 import { log } from '../lib/logger'
 import {
   folderParent,
@@ -667,6 +668,20 @@ export class NoteRepository {
     const samePath = resolve(absolute) === resolve(targetMd)
 
     if (!samePath) {
+      for (const track of ['you', 'others'] as const) {
+        const from = this.trackPathFor(sourceAudio, track)
+        const to = this.trackPathFor(targetAudio, track)
+        if (existsSync(from) && resolve(from) !== resolve(to)) {
+          await rename(from, to).catch(async (error) => {
+            if ((error as NodeJS.ErrnoException).code === 'EXDEV') {
+              await copyFile(from, to)
+              await unlink(from)
+            } else {
+              throw error
+            }
+          })
+        }
+      }
       if (hasAudio && resolve(sourceAudio) !== resolve(targetAudio)) {
         if (existsSync(targetAudio)) throw new Error('Ya existe un audio con ese nombre en la carpeta destino')
         await rename(sourceAudio, targetAudio).catch(async (error) => {
@@ -717,6 +732,60 @@ export class NoteRepository {
     return updated
   }
 
+  /**
+   * Copia la nota y su audio junto al original, con título «(copia)» y
+   * timestamps nuevos. El original no se toca.
+   */
+  async duplicate(notePath: string): Promise<NoteDetail> {
+    const absolute = this.resolveNotePath(notePath)
+    const parsed = await this.readParsed(absolute)
+    const directory = dirname(absolute)
+    const base = basename(absolute, '.md')
+    const audioField = stringField(parsed.data, 'audio')
+    const sourceAudio = audioField ? join(directory, audioField) : join(directory, `${base}.webm`)
+    const hasAudio = existsSync(sourceAudio)
+    const audioExt = hasAudio ? extname(sourceAudio) : ''
+
+    const collision = (candidate: string): boolean => {
+      const stem = basename(candidate, '.md')
+      return existsSync(candidate) || (hasAudio && existsSync(join(directory, `${stem}${audioExt}`)))
+    }
+    const targetMd = uniquePath(join(directory, `${base}-copia.md`), collision)
+    const targetBase = basename(targetMd, '.md')
+    const targetAudioName = hasAudio ? `${targetBase}${audioExt}` : null
+
+    if (targetAudioName) {
+      await copyFile(sourceAudio, join(directory, targetAudioName))
+      const targetAudioPath = join(directory, targetAudioName)
+      for (const track of ['you', 'others'] as const) {
+        const from = this.trackPathFor(sourceAudio, track)
+        if (existsSync(from)) {
+          await copyFile(from, this.trackPathFor(targetAudioPath, track))
+        }
+      }
+    }
+
+    const now = new Date().toISOString()
+    const data: Record<string, unknown> = { ...parsed.data }
+    data.title = `${String(data.title ?? base).trim() || base} (copia)`
+    if (targetAudioName) data.audio = targetAudioName
+    data.created_at = now
+    data.updated_at = now
+
+    const content = replaceTitle(parsed.content, String(data.title), stringField(data, 'date'))
+    writeAtomic(targetMd, composeWith(data, content))
+    this.cache.delete(targetMd)
+    const created = await this.get(targetMd)
+    if (!created) throw new Error('No se pudo releer la copia')
+    log.info(`Nota duplicada: ${basename(targetMd)}`)
+    return created
+  }
+
+  /** Pistas separadas (`-yo`/`-otros`) que acompañan al audio de la nota. */
+  private trackPathFor(audioPath: string, track: RecordingTrack): string {
+    return join(dirname(audioPath), trackFileName(basename(audioPath), track))
+  }
+
   async remove(notePath: string): Promise<void> {
     const absolute = this.resolveNotePath(notePath)
     if (!existsSync(absolute)) return
@@ -726,6 +795,14 @@ export class NoteRepository {
     await shell.trashItem(absolute)
     if (audioPath && existsSync(audioPath) && isInside(this.root(), audioPath)) {
       await shell.trashItem(audioPath).catch((error) => log.warn('No se pudo enviar audio a papelera', error))
+      for (const track of ['you', 'others'] as const) {
+        const trackPath = this.trackPathFor(audioPath, track)
+        if (existsSync(trackPath)) {
+          await shell
+            .trashItem(trackPath)
+            .catch((error) => log.warn('No se pudo enviar la pista a papelera', error))
+        }
+      }
     }
     this.cache.delete(absolute)
     for (const listener of this.deletedListeners) listener(absolute)

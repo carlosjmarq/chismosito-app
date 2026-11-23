@@ -60,6 +60,11 @@ class RecorderController {
   private tapSink: MediaStreamAudioDestinationNode | null = null
   private tapConsumer: MediaRecorder | null = null
   private recorder: MediaRecorder | null = null
+  /** Pistas separadas (micrófono y sistema) para conservar quién habla. */
+  private trackRecorders: Array<{
+    track: 'you' | 'others'
+    recorder: MediaRecorder
+  }> = []
   private micStream: MediaStream | null = null
   private systemStream: MediaStream | null = null
   private tapStreams: MediaStream[] = []
@@ -206,6 +211,46 @@ class RecorderController {
         })
       }
       this.recorder.start(1000)
+
+      // Graba también cada pista por separado: la re-transcripción conserva
+      // así «Yo» y «Otros» exactos, sin adivinar por la transcripción previa.
+      const trackStreams: Array<{
+        track: 'you' | 'others'
+        stream: MediaStream
+      }> = []
+      if (this.micStream) {
+        trackStreams.push({
+          track: 'you',
+          stream: new MediaStream(this.micStream.getAudioTracks())
+        })
+      }
+      if (this.systemStream) {
+        trackStreams.push({
+          track: 'others',
+          stream: new MediaStream(this.systemStream.getAudioTracks())
+        })
+      }
+      for (const entry of trackStreams) {
+        try {
+          const recorder = new MediaRecorder(entry.stream, {
+            mimeType,
+            audioBitsPerSecond: 32_000
+          })
+          recorder.ondataavailable = (event) => {
+            if (event.data.size === 0) return
+            this.chunkChain = this.chunkChain.then(async () => {
+              const buffer = await event.data.arrayBuffer()
+              if (this.sessionId) {
+                window.chismosito.recording.sendTrackChunk(this.sessionId, entry.track, buffer)
+              }
+            })
+          }
+          recorder.start(1000)
+          this.trackRecorders.push({ track: entry.track, recorder })
+        } catch {
+          // Si una pista no se puede grabar, la app sigue con el audio mezclado.
+        }
+      }
 
       this.set({
         phase: 'recording',
@@ -380,6 +425,23 @@ class RecorderController {
         node.port.postMessage({ type: 'flush' })
       }
       await sleep(250)
+
+      for (const entry of this.trackRecorders) {
+        if (entry.recorder.state === 'inactive') continue
+        await new Promise<void>((resolvePromise) => {
+          const timeout = window.setTimeout(resolvePromise, 2000)
+          entry.recorder.addEventListener(
+            'stop',
+            () => {
+              window.clearTimeout(timeout)
+              resolvePromise()
+            },
+            { once: true }
+          )
+          entry.recorder.stop()
+        })
+      }
+      this.trackRecorders = []
 
       if (this.recorder && this.recorder.state !== 'inactive') {
         await new Promise<void>((resolvePromise) => {

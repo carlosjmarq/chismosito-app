@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { existsSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type {
   Job,
   RecordingStartInput,
@@ -11,6 +11,7 @@ import type {
 import type { NoteRepository } from '../notes/repository'
 import type { JobRunner } from '../jobs/runner'
 import { ChunkFileSink, WavSink } from './sinks'
+import { trackFileName } from '@shared/recording-tracks'
 import { ensureDir } from '../lib/fs'
 import { log } from '../lib/logger'
 
@@ -35,6 +36,9 @@ interface ActiveSession {
   hasMic: boolean
   hasSystem: boolean
   webm: ChunkFileSink
+  /** Pistas separadas en Opus para conservar la separación de hablantes. */
+  trackSinks: { you: ChunkFileSink | null; others: ChunkFileSink | null }
+  trackPaths: { you: string | null; others: string | null }
   mic: WavSink | null
   system: WavSink | null
   micWavPath: string | null
@@ -72,6 +76,17 @@ export class RecordingSessionManager {
     ensureDir(tmpDir)
 
     const webm = new ChunkFileSink(allocated.partPath, allocated.audioPath)
+    const audioName = basename(allocated.audioPath)
+    const trackPath = (track: 'you' | 'others'): string =>
+      join(dirname(allocated.audioPath), trackFileName(audioName, track))
+    const youTrackPath = input.hasMic ? trackPath('you') : null
+    const othersTrackPath = input.hasSystem ? trackPath('others') : null
+    const youTrack = youTrackPath
+      ? new ChunkFileSink(youTrackPath.replace(/\.webm$/, '.part.webm'), youTrackPath)
+      : null
+    const othersTrack = othersTrackPath
+      ? new ChunkFileSink(othersTrackPath.replace(/\.webm$/, '.part.webm'), othersTrackPath)
+      : null
     const micWavPath = input.hasMic ? join(tmpDir, 'mic.wav') : null
     const systemWavPath = input.hasSystem ? join(tmpDir, 'system.wav') : null
     const mic = micWavPath ? new WavSink(micWavPath) : null
@@ -79,10 +94,14 @@ export class RecordingSessionManager {
 
     try {
       webm.open()
+      youTrack?.open()
+      othersTrack?.open()
       mic?.open()
       system?.open()
     } catch (error) {
       webm.abort()
+      youTrack?.abort()
+      othersTrack?.abort()
       mic?.abort()
       system?.abort()
       await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
@@ -102,6 +121,8 @@ export class RecordingSessionManager {
       hasMic: input.hasMic,
       hasSystem: input.hasSystem,
       webm,
+      trackSinks: { you: youTrack, others: othersTrack },
+      trackPaths: { you: youTrackPath, others: othersTrackPath },
       mic,
       system,
       micWavPath,
@@ -148,11 +169,32 @@ export class RecordingSessionManager {
     sink.append(chunk)
   }
 
+  appendTrackChunk(id: string, track: 'you' | 'others', chunk: ArrayBuffer | Uint8Array): void {
+    const session = this.sessions.get(id)
+    if (!session) return
+    session.trackSinks[track]?.append(chunk)
+  }
+
+  private finalizeTracks(session: ActiveSession): void {
+    for (const track of ['you', 'others'] as const) {
+      const sink = session.trackSinks[track]
+      const path = session.trackPaths[track]
+      if (!sink || !path) continue
+      const result = sink.finalize()
+      // Menos de ~8 KB es un WebM sin audio real: se descarta.
+      if (result.bytes < 8_000) {
+        void rm(path, { force: true }).catch(() => undefined)
+        session.trackPaths[track] = null
+      }
+    }
+  }
+
   async stop(input: RecordingStopInput): Promise<Job> {
     const session = this.sessions.get(input.id)
     if (!session) throw new Error('La grabación ya no está activa')
 
     const webmResult = session.webm.finalize()
+    this.finalizeTracks(session)
     const micResult = session.mic?.finalize() ?? null
     const systemResult = session.system?.finalize() ?? null
     this.sessions.delete(session.id)
@@ -274,8 +316,14 @@ export class RecordingSessionManager {
     if (!session) return
     this.sessions.delete(id)
     session.webm.abort()
+    session.trackSinks.you?.abort()
+    session.trackSinks.others?.abort()
     session.mic?.abort()
     session.system?.abort()
+    for (const track of ['you', 'others'] as const) {
+      const path = session.trackPaths[track]
+      if (path) await rm(path, { force: true }).catch(() => undefined)
+    }
     await rm(session.tmpDir, { recursive: true, force: true }).catch(() => undefined)
     await rm(session.audioPath, { force: true }).catch(() => undefined)
     await rm(session.partPath, { force: true }).catch(() => undefined)

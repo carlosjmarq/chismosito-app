@@ -110,6 +110,29 @@ export function mergeSpeakers(mic: RawSegment[], system: RawSegment[]): SpeakerS
   return merged
 }
 
+const MIN_REPEAT_CHARS = 12
+
+/**
+ * Whisper se queda en bucle con silencios largos y repite la misma frase.
+ * Colapsa oraciones idénticas (consecutivas o no) dejando la primera, sin
+ * tocar repeticiones cortas legítimas («Sí. Sí.»).
+ */
+export function collapseRepetitions(text: string): string {
+  const sentences = text.split(/(?<=[.!?…])\s+/)
+  if (sentences.length < 2) return text.trim()
+  const seen = new Set<string>()
+  const kept: string[] = []
+  for (const sentence of sentences) {
+    const value = sentence.trim()
+    if (!value) continue
+    const key = value.toLowerCase()
+    if (value.length >= MIN_REPEAT_CHARS && seen.has(key)) continue
+    if (value.length >= MIN_REPEAT_CHARS) seen.add(key)
+    kept.push(value)
+  }
+  return kept.join(' ')
+}
+
 export function formatTime(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds))
   const hours = Math.floor(safe / 3600)
@@ -180,11 +203,20 @@ export function renderTranscript(segments: SpeakerSegment[]): RenderedTranscript
   const plainLines: string[] = []
   let current: SpeakerSegment | null = null
   let currentStart = ''
+  let lastText = ''
 
   const flush = (): void => {
     if (!current) return
-    markdownLines.push(`[${currentStart}] **${current.speaker}:** ${current.text}`)
-    plainLines.push(`[${currentStart}] ${current.speaker}: ${current.text}`)
+    const text = collapseRepetitions(current.text)
+    const key = text.toLowerCase()
+    // Descarta líneas que repiten exactamente la anterior (bucle de whisper).
+    if (text.length >= MIN_REPEAT_CHARS && key === lastText) {
+      current = null
+      return
+    }
+    lastText = key
+    markdownLines.push(`[${currentStart}] **${current.speaker}:** ${text}`)
+    plainLines.push(`[${currentStart}] ${current.speaker}: ${text}`)
     current = null
   }
 

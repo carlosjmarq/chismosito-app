@@ -3,7 +3,6 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildWhisperArgs } from './args'
 import { log } from '../lib/logger'
 
 export interface RawSegment {
@@ -19,7 +18,12 @@ export interface WhisperRunOptions {
   language: string
   device: 'cpu' | 'cuda'
   threads: number
+  /** Sin contexto previo: evita bucles de repetición en audio con silencios. */
+  noContext?: boolean
+  /** Modelo VAD (silero): corta el audio en tramos con voz. */
   vadModelPath?: string | null
+  /** Se llama con cada segmento en cuanto whisper lo imprime (streaming). */
+  onSegment?: (segment: RawSegment) => void
   signal?: AbortSignal
   onProgress?: (percent: number) => void
 }
@@ -52,6 +56,55 @@ function segmentMs(segment: WhisperJsonSegment): { from: number; to: number } {
   return { from: Number(from) || 0, to: Number(to) || 0 }
 }
 
+const SEGMENT_LINE =
+  /^\[(\d{1,2}):(\d{2}):(\d{2})\.(\d{3}) --> (\d{1,2}):(\d{2}):(\d{2})\.(\d{3})\]\s*(.*)$/
+
+function timestampMs(h: string, m: string, s: string, ms: string): number {
+  return Number(h) * 3_600_000 + Number(m) * 60_000 + Number(s) * 1_000 + Number(ms)
+}
+
+/** Parsea una línea de segmento que whisper imprime en stdout. */
+export function parseSegmentLine(line: string): RawSegment | null {
+  const match = line.match(SEGMENT_LINE)
+  if (!match) return null
+  const text = match[9].trim()
+  if (!text) return null
+  return {
+    fromMs: timestampMs(match[1], match[2], match[3], match[4]),
+    toMs: timestampMs(match[5], match[6], match[7], match[8]),
+    text
+  }
+}
+
+/**
+ * Construye los argumentos de whisper-cli.
+ *
+ * En modo `noContext` se pasan `-mc 0` (sin contexto previo), `-et 2.0`
+ * (umbral de entropía bajo) y `-sns` (sin tokens de no-habla): juntos evitan
+ * que una alucinación se propague al resto de la transcripción. `--vad` usa
+ * Silero para ignorar los silencios.
+ */
+export function buildWhisperArgs(options: WhisperRunOptions, outputBase: string): string[] {
+  const args = [
+    '-m',
+    options.modelPath,
+    '-f',
+    options.wavPath,
+    '-l',
+    options.language || 'es',
+    '-t',
+    String(Math.max(1, options.threads)),
+    '-oj',
+    '-of',
+    outputBase,
+    '-pp'
+  ]
+  if (options.noContext) args.push('-mc', '0', '-et', '2.0', '-sns')
+  if (options.vadModelPath) args.push('--vad', '-vm', options.vadModelPath)
+  if (options.device === 'cpu') args.push('-ng')
+  return args
+}
+
 export async function runWhisper(options: WhisperRunOptions): Promise<RawSegment[]> {
   if (!existsSync(options.cliPath)) {
     throw new Error('No se encontró whisper-cli.exe. Reinstala la aplicación.')
@@ -70,15 +123,7 @@ export async function runWhisper(options: WhisperRunOptions): Promise<RawSegment
   if (!vadModelPath) {
     log.warn('Modelo VAD de Silero no encontrado; se transcribe sin detección de voz')
   }
-  const args = buildWhisperArgs({
-    modelPath: options.modelPath,
-    wavPath: options.wavPath,
-    language: options.language,
-    device: options.device,
-    threads: options.threads,
-    outputBase,
-    vadModelPath
-  })
+  const args = buildWhisperArgs({ ...options, vadModelPath }, outputBase)
 
   log.info('whisper.cpp', args.join(' '))
 
@@ -90,6 +135,7 @@ export async function runWhisper(options: WhisperRunOptions): Promise<RawSegment
       })
       let stderr = ''
       let stdout = ''
+      let stdoutPending = ''
       let lastPercent = -1
       let killedForAbort = false
 
@@ -104,8 +150,23 @@ export async function runWhisper(options: WhisperRunOptions): Promise<RawSegment
         }
       }
 
+      // whisper imprime cada segmento en stdout en cuanto lo decodifica:
+      //   [00:00:12.000 --> 00:00:18.400]   texto
+      const parseSegments = (): void => {
+        if (!options.onSegment) return
+        const lines = stdoutPending.split(/\r?\n/)
+        stdoutPending = lines.pop() ?? ''
+        for (const line of lines) {
+          const segment = parseSegmentLine(line)
+          if (segment) options.onSegment(segment)
+        }
+      }
+
       child.stdout?.on('data', (chunk) => {
-        stdout += String(chunk)
+        const text = String(chunk)
+        stdout += text
+        stdoutPending += text
+        parseSegments()
         handleOutput(stdout.slice(-400))
       })
       child.stderr?.on('data', (chunk) => {
